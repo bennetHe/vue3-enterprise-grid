@@ -10,7 +10,10 @@
     "test": "vitest"
   },
   "dependencies": {
-    "vue": "^3.3.0"
+    "vue": "^3.3.0",
+    "ag-grid-community": "^29.4.0",
+    "ag-grid-vue3": "^29.4.0",
+    "xlsx": "^0.18.9"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^4.0.0",

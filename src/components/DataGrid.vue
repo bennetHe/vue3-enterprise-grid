@@ -1,36 +1,36 @@
 <template>
-  <div class="grid-root">
-    <!-- Header -->
-    <div class="grid-header">
-      <div class="grid-row header">
-        <div v-for="col in columns" :key="col.key" class="grid-cell header-cell">
-          {{ col.title }}
-        </div>
-      </div>
-    </div>
-
-    <!-- Body (simple non-virtual rendering for scaffold) -->
-    <div class="grid-body">
-      <div v-for="(row, rIdx) in rowData" :key="row[rowKey] || rIdx" class="grid-row">
-        <div v-for="col in columns" :key="col.key" class="grid-cell">
-          {{ row[col.key] }}
-        </div>
-      </div>
-    </div>
-
-    <!-- Footer / status -->
-    <div class="grid-footer">
-      <small>Rows: {{ rowData.length }}</small>
-    </div>
+  <div class="ag-theme-alpine" style="width:100%; height:60vh;">
+    <ag-grid-vue
+      ref="agRef"
+      :columnDefs="columnDefs"
+      :rowData="rowData"
+      :defaultColDef="defaultColDef"
+      :rowSelection="rowSelection"
+      :animateRows="true"
+      :suppressClickEdit="false"
+      :suppressMenuHide="false"
+      :getContextMenuItems="getContextMenuItems"
+      @grid-ready="onGridReady"
+    />
   </div>
 </template>
 
 <script lang="ts">
-import { defineComponent, onMounted, ref, toRefs } from 'vue'
+import { defineComponent, ref, onMounted, watch } from 'vue'
+import { AgGridVue } from 'ag-grid-vue3'
+import type { ColumnDef as AgColumnDef, GridApi, ColumnApi } from 'ag-grid-community'
+import 'ag-grid-community/styles/ag-grid.css'
+import 'ag-grid-community/styles/ag-theme-alpine.css'
+import * as XLSX from 'xlsx'
+
+// expose XLSX for potential integrations
+if (typeof window !== 'undefined') (window as any).XLSX = XLSX
+
 import type { ColumnDef, RowData } from '../types'
 
 export default defineComponent({
   name: 'DataGrid',
+  components: { AgGridVue },
   props: {
     columns: { type: Array as () => ColumnDef[], required: true },
     rowData: { type: Array as () => RowData[], required: true },
@@ -38,32 +38,105 @@ export default defineComponent({
   },
   emits: ['ready'],
   setup(props, { emit }) {
-    const { columns, rowData, rowKey } = toRefs(props)
+    const agRef = ref<any>(null)
+    const gridApi = ref<GridApi | null>(null)
+    const columnApi = ref<ColumnApi | null>(null)
 
-    const internalApi = ref({})
+    const columnDefs = ref<AgColumnDef[]>(props.columns.map(c => ({ field: c.key, headerName: c.title ?? c.key, hide: c.visible === false, width: c.width })))
 
-    onMounted(() => {
-      // Expose a minimal API for now
-      internalApi.value = {
-        getSelectedRows: () => [],
-        setColumnVisible: (key: string, visible: boolean) => {
-          console.log('setColumnVisible', key, visible)
-        }
-      }
-      emit('ready', internalApi.value)
+    watch(() => props.columns, (nv) => {
+      columnDefs.value = nv.map(c => ({ field: c.key, headerName: c.title ?? c.key, hide: c.visible === false, width: c.width }))
+    }, { deep: true })
+
+    watch(() => props.rowData, (nv) => {
+      // when parent replaces rowData, set row data on grid
+      if (gridApi.value) gridApi.value.setRowData(nv || [])
     })
 
-    return { columns, rowData, rowKey }
+    const defaultColDef = { resizable: true, sortable: true, filter: true }
+    const rowSelection = 'multiple'
+
+    function onGridReady(params: any) {
+      gridApi.value = params.api
+      columnApi.value = params.columnApi
+
+      // expose simple api
+      const api = {
+        getSelectedRows: () => gridApi.value ? gridApi.value.getSelectedRows() : [],
+        setColumnVisible: (key: string, visible: boolean) => columnApi.value && columnApi.value.setColumnVisible(key, visible),
+        applyTransaction: (tx: any) => gridApi.value ? gridApi.value.applyTransaction(tx) : null,
+        setSort: (key: string | null, dir?: 'asc'|'desc') => {
+          if (!gridApi.value) return
+          if (!key) { gridApi.value.setSortModel([]); return }
+          gridApi.value.setSortModel([{ colId: key, sort: dir || 'asc' }])
+        },
+        exportCsv: (params = { fileName: 'export.csv' }) => gridApi.value && gridApi.value.exportDataAsCsv(params),
+        exportXlsx: exportXlsx,
+        copySelectedToClipboard: copySelectedToClipboard
+      }
+
+      emit('ready', api)
+    }
+
+    function getContextMenuItems(params: any) {
+      const result = [
+        'copy',
+        'copyWithHeaders',
+        'separator',
+        {
+          name: 'Export CSV',
+          action: () => {
+            if (gridApi.value) gridApi.value.exportDataAsCsv({ fileName: 'export.csv' })
+          }
+        },
+        {
+          name: 'Export XLSX',
+          action: () => exportXlsx()
+        },
+        'separator',
+        {
+          name: 'Show Details',
+          action: () => alert(JSON.stringify(params.node?.data || params.value))
+        }
+      ]
+      return result
+    }
+
+    async function copySelectedToClipboard() {
+      if (!gridApi.value) return
+      const selected = gridApi.value.getSelectedRows()
+      if (!selected || selected.length === 0) {
+        // fallback to all displayed rows
+        const rows: any[] = []
+        gridApi.value.forEachNodeAfterFilterAndSort((node: any) => { if (node.data) rows.push(node.data) })
+        const text = rows.map(r => Object.values(r).join('\t')).join('\n')
+        try { await navigator.clipboard.writeText(text); alert('Copied visible rows to clipboard') } catch (e) { console.warn('clipboard failed', e) }
+        return
+      }
+      const text = selected.map(r => Object.values(r).join('\t')).join('\n')
+      try { await navigator.clipboard.writeText(text); alert('Copied selection to clipboard') } catch (e) { console.warn('clipboard failed', e) }
+    }
+
+    function exportXlsx() {
+      if (!gridApi.value) return
+      const rows: any[] = []
+      gridApi.value.forEachNodeAfterFilterAndSort((node: any) => { if (node.data) rows.push(node.data) })
+      if (!rows.length) { alert('No rows to export'); return }
+      const ws = XLSX.utils.json_to_sheet(rows)
+      const wb = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(wb, ws, 'Sheet1')
+      XLSX.writeFile(wb, 'export.xlsx')
+    }
+
+    onMounted(() => {
+      // nothing for now
+    })
+
+    return { agRef, columnDefs, defaultColDef, rowSelection, onGridReady, getContextMenuItems }
   }
 })
 </script>
 
 <style scoped>
-.grid-root { border: 1px solid #ddd; background: #fff }
-.grid-header { background: #f1f5f9; border-bottom: 1px solid #e5e7eb }
-.grid-row { display: flex }
-.grid-cell { padding: 8px 12px; border-right: 1px solid #eee; min-width: 80px }
-.header-cell { font-weight: 600 }
-.grid-body { max-height: 60vh; overflow: auto }
-.grid-footer { padding: 8px 12px; border-top: 1px solid #eee; background: #fafafa }
+.ag-theme-alpine { border: 1px solid #e5e7eb; background: #fff }
 </style>
